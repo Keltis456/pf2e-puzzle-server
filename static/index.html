@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .user-info { font-size: 14px; color: #666; }
+    .user-info strong { color: #333; }
+    .logout-btn { padding: 8px 16px; background: #e53e3e; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    .logout-btn:hover { background: #c53030; }
+    .grid { display: grid; grid-template-columns: repeat(6, 60px); gap: 10px; }
+    .cube { width: 60px; height: 60px; border: 2px solid #444; display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
+    .hl { outline: 6px solid gold; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div id="status"></div>
+    <div class="user-info">
+      <span id="user-display"></span>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    async function checkAuth() {
+      try {
+        const response = await fetch('/api/session');
+        if (!response.ok) {
+          location.href = '/login.html' + location.search;
+          return null;
+        }
+        return await response.json();
+      } catch (err) {
+        location.href = '/login.html' + location.search;
+        return null;
+      }
+    }
+
+    async function logout() {
+      await fetch('/api/logout');
+      location.href = '/login.html' + location.search;
+    }
+
+    async function init() {
+      const session = await checkAuth();
+      if (!session) return;
+
+      const userDisplay = document.getElementById('user-display');
+      if (session.role === 'player') {
+        userDisplay.innerHTML = `<strong>${session.name}</strong> (Player) | `;
+      } else {
+        userDisplay.innerHTML = `<strong>Dungeon Master</strong> | `;
+      }
+
+      startApp();
+    }
+
+    function startApp() {
+    const roomId = new URLSearchParams(location.search).get("room") || "table-01";
+    const statusEl = document.getElementById("status");
+    const grid = document.getElementById("grid");
+
+    // Build 36 cubes
+    for (let i = 1; i <= 36; i++) {
+      const d = document.createElement("div");
+      d.className = "cube";
+      d.dataset.cubeId = String(i);
+      d.textContent = i;
+      d.onclick = () => send({ type: "cube_toggle", cubeId: d.dataset.cubeId });
+      grid.appendChild(d);
+    }
+
+    function setHighlighted(cubeId, on) {
+      const el = document.querySelector(`[data-cube-id="${cubeId}"]`);
+      if (!el) return;
+      el.classList.toggle("hl", !!on);
+    }
+
+    function applySnapshot(highlighted) {
+      // Clear all
+      document.querySelectorAll(".cube").forEach(el => el.classList.remove("hl"));
+      // Apply
+      highlighted.forEach(id => setHighlighted(String(id), true));
+    }
+
+    let ws;
+
+    function connect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws/${roomId}`);
+
+      ws.onopen = () => {
+        statusEl.textContent = `Connected (room: ${roomId})`;
+        // Optionally request state explicitly
+        send({ type: "state_request" });
+      };
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === "state_sync") {
+          applySnapshot(msg.highlighted || []);
+        } else if (msg.type === "cube_toggled") {
+          setHighlighted(msg.cubeId, msg.isHighlighted);
+        } else if (msg.type === "error") {
+          console.warn("Server error:", msg.message);
+        }
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = "Disconnected. Reconnecting…";
+        setTimeout(connect, 800);
+      };
+    }
+
+    function send(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    setInterval(() => send({ type: "ping" }), 15000);
+
+    connect();
+    }
+
+    init();
+  </script>
+</body>
+</html>

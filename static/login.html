@@ -1,0 +1,230 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Login - PF2e Puzzle</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      padding: 40px;
+      width: 100%;
+      max-width: 400px;
+    }
+    h1 {
+      margin: 0 0 30px 0;
+      text-align: center;
+      color: #333;
+    }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+    .tab {
+      flex: 1;
+      padding: 12px;
+      border: 2px solid #ddd;
+      background: white;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: center;
+      font-size: 16px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .tab:hover {
+      border-color: #667eea;
+    }
+    .tab.active {
+      background: #667eea;
+      color: white;
+      border-color: #667eea;
+    }
+    .form-section {
+      display: none;
+    }
+    .form-section.active {
+      display: block;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+      color: #555;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #ddd;
+      border-radius: 6px;
+      font-size: 16px;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #5568d3;
+    }
+    button:active {
+      transform: translateY(1px);
+    }
+    .error {
+      color: #e53e3e;
+      margin-top: 10px;
+      text-align: center;
+      display: none;
+    }
+    .error.show {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PF2e Puzzle Login</h1>
+    
+    <div class="tabs">
+      <div class="tab active" data-role="player">Player</div>
+      <div class="tab" data-role="dm">Dungeon Master</div>
+    </div>
+
+    <div class="form-section active" id="player-form">
+      <form onsubmit="return handlePlayerLogin(event)">
+        <div class="form-group">
+          <label for="player-name">Your Name</label>
+          <input type="text" id="player-name" name="name" placeholder="Enter your name" required />
+        </div>
+        <button type="submit">Join as Player</button>
+      </form>
+      <div class="error" id="player-error"></div>
+    </div>
+
+    <div class="form-section" id="dm-form">
+      <form onsubmit="return handleDMLogin(event)">
+        <div class="form-group">
+          <label for="dm-password">DM Password</label>
+          <input type="password" id="dm-password" name="password" placeholder="Enter DM password" required />
+        </div>
+        <button type="submit">Login as DM</button>
+      </form>
+      <div class="error" id="dm-error"></div>
+    </div>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const forms = document.querySelectorAll('.form-section');
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const role = tab.dataset.role;
+        
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        
+        forms.forEach(f => f.classList.remove('active'));
+        document.getElementById(`${role}-form`).classList.add('active');
+        
+        document.querySelectorAll('.error').forEach(e => e.classList.remove('show'));
+      });
+    });
+
+    async function handlePlayerLogin(event) {
+      event.preventDefault();
+      const name = document.getElementById('player-name').value.trim();
+      const errorEl = document.getElementById('player-error');
+      
+      errorEl.classList.remove('show');
+      
+      if (!name) {
+        errorEl.textContent = 'Please enter your name';
+        errorEl.classList.add('show');
+        return false;
+      }
+
+      try {
+        const response = await fetch('/api/login/player', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          const roomId = new URLSearchParams(location.search).get("room") || "table-01";
+          location.href = `/?room=${roomId}`;
+        } else {
+          errorEl.textContent = data.message || 'Login failed';
+          errorEl.classList.add('show');
+        }
+      } catch (err) {
+        errorEl.textContent = 'Connection error. Please try again.';
+        errorEl.classList.add('show');
+      }
+
+      return false;
+    }
+
+    async function handleDMLogin(event) {
+      event.preventDefault();
+      const password = document.getElementById('dm-password').value;
+      const errorEl = document.getElementById('dm-error');
+      
+      errorEl.classList.remove('show');
+
+      try {
+        const response = await fetch('/api/login/dm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          const roomId = new URLSearchParams(location.search).get("room") || "table-01";
+          location.href = `/?room=${roomId}`;
+        } else {
+          errorEl.textContent = data.message || 'Invalid password';
+          errorEl.classList.add('show');
+        }
+      } catch (err) {
+        errorEl.textContent = 'Connection error. Please try again.';
+        errorEl.classList.add('show');
+      }
+
+      return false;
+    }
+  </script>
+</body>
+</html>
