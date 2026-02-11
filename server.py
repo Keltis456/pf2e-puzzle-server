@@ -32,6 +32,8 @@ class Room:
     highlighted: Set[str] = field(default_factory=set)
     clients: Set[WebSocket] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    layers: int = 5
+    bottom_size: int = 1
 
 
 rooms: Dict[str, Room] = {}
@@ -57,6 +59,54 @@ def create_session(role: str, name: str = None) -> str:
 
 def get_session(session_id: str) -> Dict | None:
     return sessions.get(session_id)
+
+
+def can_highlight_circle(room: Room, layer: int, index: int) -> bool:
+    if layer == 0:
+        return True
+    
+    connected_below = [
+        (layer - 1, index),
+        (layer - 1, index + 1)
+    ]
+    
+    for (l, i) in connected_below:
+        circles_in_layer = room.bottom_size + l
+        if l >= 0 and i < circles_in_layer:
+            circle_id = f"{l}-{i}"
+            if circle_id in room.highlighted:
+                return True
+    
+    return False
+
+
+def has_dependent_circles(room: Room, layer: int, index: int) -> bool:
+    for highlighted_id in room.highlighted:
+        h_layer, h_index = map(int, highlighted_id.split('-'))
+        if h_layer > layer:
+            temp_highlighted = room.highlighted - {f"{layer}-{index}"}
+            if not can_highlight_circle_with_set(room, h_layer, h_index, temp_highlighted):
+                return True
+    return False
+
+
+def can_highlight_circle_with_set(room: Room, layer: int, index: int, highlighted_set: Set[str]) -> bool:
+    if layer == 0:
+        return True
+    
+    connected_below = [
+        (layer - 1, index),
+        (layer - 1, index + 1)
+    ]
+    
+    for (l, i) in connected_below:
+        circles_in_layer = room.bottom_size + l
+        if l >= 0 and i < circles_in_layer:
+            circle_id = f"{l}-{i}"
+            if circle_id in highlighted_set:
+                return True
+    
+    return False
 
 
 # --------- Messaging helpers ---------
@@ -100,12 +150,13 @@ async def ws_room(ws: WebSocket, room_id: str):
     room = get_room(room_id)
     room.clients.add(ws)
 
-    # Initial snapshot (join/reconnect)
     await safe_send(
         ws,
         {
             "type": "state_sync",
             "highlighted": sorted(room.highlighted),
+            "layers": room.layers,
+            "bottomSize": room.bottom_size,
         },
     )
 
@@ -124,26 +175,78 @@ async def ws_room(ws: WebSocket, room_id: str):
                 await safe_send(ws, {"type": "error", "message": "Missing or invalid 'type'"})
                 continue
 
-            if msg_type == "cube_toggle":
-                cube_id = msg.get("cubeId")
-                if not isinstance(cube_id, str):
-                    await safe_send(ws, {"type": "error", "message": "cubeId must be a string"})
+            if msg_type == "circle_toggle":
+                circle_id = msg.get("circleId")
+                if not isinstance(circle_id, str):
+                    await safe_send(ws, {"type": "error", "message": "circleId must be a string"})
+                    continue
+
+                try:
+                    layer, index = map(int, circle_id.split('-'))
+                except (ValueError, AttributeError):
+                    await safe_send(ws, {"type": "error", "message": "Invalid circleId format"})
                     continue
 
                 async with room.lock:
-                    if cube_id in room.highlighted:
-                        room.highlighted.remove(cube_id)
+                    if circle_id in room.highlighted:
+                        if has_dependent_circles(room, layer, index):
+                            await safe_send(ws, {
+                                "type": "toggle_rejected",
+                                "circleId": circle_id,
+                                "reason": "Cannot deselect: circles above depend on this one"
+                            })
+                            continue
+                        
+                        room.highlighted.remove(circle_id)
                         is_highlighted = False
                     else:
-                        room.highlighted.add(cube_id)
+                        if not can_highlight_circle(room, layer, index):
+                            await safe_send(ws, {
+                                "type": "toggle_rejected",
+                                "circleId": circle_id,
+                                "reason": "Must highlight a connected circle below first"
+                            })
+                            continue
+                        
+                        room.highlighted.add(circle_id)
                         is_highlighted = True
 
                 await broadcast(
                     room,
                     {
-                        "type": "cube_toggled",
-                        "cubeId": cube_id,
+                        "type": "circle_toggled",
+                        "circleId": circle_id,
                         "isHighlighted": is_highlighted,
+                    },
+                )
+
+            elif msg_type == "pyramid_config":
+                if session.get("role") != "dm":
+                    await safe_send(ws, {"type": "error", "message": "Only DM can configure pyramid"})
+                    continue
+
+                layers = msg.get("layers")
+                bottom_size = msg.get("bottomSize")
+
+                if not isinstance(layers, int) or layers < 1:
+                    await safe_send(ws, {"type": "error", "message": "layers must be a positive integer"})
+                    continue
+
+                if not isinstance(bottom_size, int) or bottom_size < 1:
+                    await safe_send(ws, {"type": "error", "message": "bottomSize must be a positive integer"})
+                    continue
+
+                async with room.lock:
+                    room.layers = layers
+                    room.bottom_size = bottom_size
+                    room.highlighted.clear()
+
+                await broadcast(
+                    room,
+                    {
+                        "type": "config_sync",
+                        "layers": layers,
+                        "bottomSize": bottom_size,
                     },
                 )
 
@@ -153,6 +256,8 @@ async def ws_room(ws: WebSocket, room_id: str):
                     {
                         "type": "state_sync",
                         "highlighted": sorted(room.highlighted),
+                        "layers": room.layers,
+                        "bottomSize": room.bottom_size,
                     },
                 )
 

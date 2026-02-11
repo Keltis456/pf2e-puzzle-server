@@ -3,28 +3,152 @@
 <head>
   <meta charset="utf-8" />
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-    .user-info { font-size: 14px; color: #666; }
-    .user-info strong { color: #333; }
-    .logout-btn { padding: 8px 16px; background: #e53e3e; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-    .logout-btn:hover { background: #c53030; }
-    .grid { display: grid; grid-template-columns: repeat(6, 60px); gap: 10px; }
-    .cube { width: 60px; height: 60px; border: 2px solid #444; display:flex; align-items:center; justify-content:center; cursor:pointer; user-select:none; }
-    .hl { outline: 6px solid gold; }
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      padding: 20px; 
+      margin: 0;
+      background: #f5f5f5;
+    }
+    .header { 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: center; 
+      margin-bottom: 20px;
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .status-section {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    #status {
+      font-size: 14px;
+      color: #333;
+    }
+    .config-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #f0f0f0;
+      border-radius: 6px;
+    }
+    .config-controls label {
+      font-size: 13px;
+      color: #555;
+    }
+    .config-controls input {
+      width: 50px;
+      padding: 4px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .config-controls button {
+      padding: 6px 12px;
+      background: #4299e1;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .config-controls button:hover {
+      background: #3182ce;
+    }
+    .user-info { 
+      font-size: 14px; 
+      color: #666; 
+    }
+    .user-info strong { 
+      color: #333; 
+    }
+    .logout-btn { 
+      padding: 8px 16px; 
+      background: #e53e3e; 
+      color: white; 
+      border: none; 
+      border-radius: 4px; 
+      cursor: pointer; 
+      font-size: 14px; 
+      margin-left: 10px;
+    }
+    .logout-btn:hover { 
+      background: #c53030; 
+    }
+    #pyramid-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 500px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      padding: 40px;
+    }
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .connection-line {
+      stroke: #ccc;
+      stroke-width: 2;
+      fill: none;
+    }
+    .circle {
+      fill: #F5E6D3;
+      stroke: #8B7355;
+      stroke-width: 2;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .circle.highlighted {
+      fill: #FFD700;
+      stroke: #DAA520;
+      stroke-width: 3;
+    }
+    .circle.valid-hover:hover {
+      transform: scale(1.1);
+      fill: #FFF4CC;
+    }
+    .circle.invalid-hover {
+      cursor: not-allowed;
+    }
+    .circle.invalid-hover:hover {
+      fill: #FFB3B3;
+    }
   </style>
 </head>
 <body>
   <div class="header">
-    <div id="status"></div>
+    <div class="status-section">
+      <div id="status">Connecting...</div>
+      <div id="config-controls" class="config-controls" style="display: none;">
+        <label>Layers: <input type="number" id="layers-input" min="1" max="15" value="5"></label>
+        <label>Bottom Size: <input type="number" id="bottom-size-input" min="1" max="15" value="1"></label>
+        <button onclick="applyConfig()">Apply</button>
+      </div>
+    </div>
     <div class="user-info">
       <span id="user-display"></span>
       <button class="logout-btn" onclick="logout()">Logout</button>
     </div>
   </div>
-  <div class="grid" id="grid"></div>
+  
+  <div id="pyramid-container">
+    <svg id="pyramid-svg" width="1000" height="600" viewBox="0 0 1000 600"></svg>
+  </div>
 
   <script>
+    let currentSession = null;
+    let ws = null;
+    let pyramidConfig = { layers: 5, bottomSize: 1 };
+    let highlighted = new Set();
+    let pyramidData = { circles: [], connections: [] };
+
     async function checkAuth() {
       try {
         const response = await fetch('/api/session');
@@ -44,57 +168,162 @@
       location.href = '/login.html' + location.search;
     }
 
-    async function init() {
-      const session = await checkAuth();
-      if (!session) return;
-
-      const userDisplay = document.getElementById('user-display');
-      if (session.role === 'player') {
-        userDisplay.innerHTML = `<strong>${session.name}</strong> (Player) | `;
-      } else {
-        userDisplay.innerHTML = `<strong>Dungeon Master</strong> | `;
+    function calculatePyramidLayout(layers, bottomSize) {
+      const CIRCLE_RADIUS = 30;
+      const HORIZONTAL_SPACING = 80;
+      const VERTICAL_SPACING = 80;
+      
+      const circles = [];
+      const connections = [];
+      
+      for (let layer = 0; layer < layers; layer++) {
+        const circlesInLayer = bottomSize + layer;
+        const layerY = (layers - 1 - layer) * VERTICAL_SPACING + 100;
+        const layerWidth = (circlesInLayer - 1) * HORIZONTAL_SPACING;
+        const startX = (1000 - layerWidth) / 2;
+        
+        for (let i = 0; i < circlesInLayer; i++) {
+          const x = startX + i * HORIZONTAL_SPACING;
+          const y = layerY;
+          const id = `${layer}-${i}`;
+          
+          circles.push({ id, layer, index: i, x, y, radius: CIRCLE_RADIUS });
+          
+          if (layer < layers - 1) {
+            connections.push({ from: id, to: `${layer + 1}-${i}` });
+            if (i < circlesInLayer - 1) {
+              connections.push({ from: id, to: `${layer + 1}-${i + 1}` });
+            }
+          }
+        }
       }
-
-      startApp();
+      
+      return { circles, connections };
     }
 
-    function startApp() {
-    const roomId = new URLSearchParams(location.search).get("room") || "table-01";
-    const statusEl = document.getElementById("status");
-    const grid = document.getElementById("grid");
-
-    // Build 36 cubes
-    for (let i = 1; i <= 36; i++) {
-      const d = document.createElement("div");
-      d.className = "cube";
-      d.dataset.cubeId = String(i);
-      d.textContent = i;
-      d.onclick = () => send({ type: "cube_toggle", cubeId: d.dataset.cubeId });
-      grid.appendChild(d);
+    function canHighlightCircle(circleId, currentHighlighted, config) {
+      const [layer, index] = circleId.split('-').map(Number);
+      
+      if (layer === 0) return true;
+      
+      const below1 = `${layer - 1}-${index}`;
+      const below2 = `${layer - 1}-${index + 1}`;
+      
+      return currentHighlighted.has(below1) || currentHighlighted.has(below2);
     }
 
-    function setHighlighted(cubeId, on) {
-      const el = document.querySelector(`[data-cube-id="${cubeId}"]`);
-      if (!el) return;
-      el.classList.toggle("hl", !!on);
+    function canDeselect(circleId, currentHighlighted, config) {
+      const [layer, index] = circleId.split('-').map(Number);
+      
+      for (const highlighted of currentHighlighted) {
+        if (highlighted === circleId) continue;
+        
+        const [hLayer, hIndex] = highlighted.split('-').map(Number);
+        if (hLayer > layer) {
+          const tempSet = new Set(currentHighlighted);
+          tempSet.delete(circleId);
+          if (!canHighlightCircle(highlighted, tempSet, config)) {
+            return false;
+          }
+        }
+      }
+      return true;
     }
 
-    function applySnapshot(highlighted) {
-      // Clear all
-      document.querySelectorAll(".cube").forEach(el => el.classList.remove("hl"));
-      // Apply
-      highlighted.forEach(id => setHighlighted(String(id), true));
+    function renderPyramid() {
+      const svg = document.getElementById('pyramid-svg');
+      svg.innerHTML = '';
+      
+      pyramidData = calculatePyramidLayout(pyramidConfig.layers, pyramidConfig.bottomSize);
+      
+      const circleMap = new Map();
+      pyramidData.circles.forEach(c => circleMap.set(c.id, c));
+      
+      pyramidData.connections.forEach(conn => {
+        const from = circleMap.get(conn.from);
+        const to = circleMap.get(conn.to);
+        if (from && to) {
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', from.x);
+          line.setAttribute('y1', from.y);
+          line.setAttribute('x2', to.x);
+          line.setAttribute('y2', to.y);
+          line.setAttribute('class', 'connection-line');
+          svg.appendChild(line);
+        }
+      });
+      
+      pyramidData.circles.forEach(circle => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        
+        const circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circ.setAttribute('cx', circle.x);
+        circ.setAttribute('cy', circle.y);
+        circ.setAttribute('r', circle.radius);
+        circ.setAttribute('class', 'circle');
+        circ.setAttribute('data-circle-id', circle.id);
+        
+        if (highlighted.has(circle.id)) {
+          circ.classList.add('highlighted');
+        }
+        
+        const isHighlighted = highlighted.has(circle.id);
+        const canClick = isHighlighted 
+          ? canDeselect(circle.id, highlighted, pyramidConfig)
+          : canHighlightCircle(circle.id, highlighted, pyramidConfig);
+        
+        if (canClick) {
+          circ.classList.add('valid-hover');
+        } else {
+          circ.classList.add('invalid-hover');
+        }
+        
+        circ.onclick = () => handleCircleClick(circle.id);
+        
+        g.appendChild(circ);
+        svg.appendChild(g);
+      });
     }
 
-    let ws;
+    function handleCircleClick(circleId) {
+      const isHighlighted = highlighted.has(circleId);
+      const canClick = isHighlighted 
+        ? canDeselect(circleId, highlighted, pyramidConfig)
+        : canHighlightCircle(circleId, highlighted, pyramidConfig);
+      
+      if (!canClick) {
+        return;
+      }
+      
+      send({ type: "circle_toggle", circleId: circleId });
+    }
+
+    function applySnapshot(highlightedArray) {
+      highlighted.clear();
+      highlightedArray.forEach(id => highlighted.add(id));
+      renderPyramid();
+    }
+
+    function applyConfig() {
+      const layers = parseInt(document.getElementById('layers-input').value);
+      const bottomSize = parseInt(document.getElementById('bottom-size-input').value);
+      
+      if (layers < 1 || bottomSize < 1) {
+        alert('Layers and bottom size must be at least 1');
+        return;
+      }
+      
+      send({ type: "pyramid_config", layers, bottomSize });
+    }
 
     function connect() {
+      const roomId = new URLSearchParams(location.search).get("room") || "table-01";
+      const statusEl = document.getElementById("status");
       const proto = location.protocol === "https:" ? "wss" : "ws";
       ws = new WebSocket(`${proto}://${location.host}/ws/${roomId}`);
 
       ws.onopen = () => {
         statusEl.textContent = `Connected (room: ${roomId})`;
-        // Optionally request state explicitly
         send({ type: "state_request" });
       };
 
@@ -102,9 +331,37 @@
         const msg = JSON.parse(ev.data);
 
         if (msg.type === "state_sync") {
+          if (msg.layers !== undefined) pyramidConfig.layers = msg.layers;
+          if (msg.bottomSize !== undefined) pyramidConfig.bottomSize = msg.bottomSize;
+          
+          document.getElementById('layers-input').value = pyramidConfig.layers;
+          document.getElementById('bottom-size-input').value = pyramidConfig.bottomSize;
+          
           applySnapshot(msg.highlighted || []);
-        } else if (msg.type === "cube_toggled") {
-          setHighlighted(msg.cubeId, msg.isHighlighted);
+          
+          const topSize = pyramidConfig.bottomSize + pyramidConfig.layers - 1;
+          statusEl.textContent = `Connected (room: ${roomId}) | Pyramid: ${pyramidConfig.layers} layers, bottom: ${pyramidConfig.bottomSize}, top: ${topSize}`;
+        } else if (msg.type === "config_sync") {
+          pyramidConfig.layers = msg.layers;
+          pyramidConfig.bottomSize = msg.bottomSize;
+          
+          document.getElementById('layers-input').value = pyramidConfig.layers;
+          document.getElementById('bottom-size-input').value = pyramidConfig.bottomSize;
+          
+          highlighted.clear();
+          renderPyramid();
+          
+          const topSize = pyramidConfig.bottomSize + pyramidConfig.layers - 1;
+          statusEl.textContent = `Connected (room: ${roomId}) | Pyramid: ${pyramidConfig.layers} layers, bottom: ${pyramidConfig.bottomSize}, top: ${topSize}`;
+        } else if (msg.type === "circle_toggled") {
+          if (msg.isHighlighted) {
+            highlighted.add(msg.circleId);
+          } else {
+            highlighted.delete(msg.circleId);
+          }
+          renderPyramid();
+        } else if (msg.type === "toggle_rejected") {
+          console.warn("Toggle rejected:", msg.reason);
         } else if (msg.type === "error") {
           console.warn("Server error:", msg.message);
         }
@@ -122,9 +379,20 @@
       }
     }
 
-    setInterval(() => send({ type: "ping" }), 15000);
+    async function init() {
+      currentSession = await checkAuth();
+      if (!currentSession) return;
 
-    connect();
+      const userDisplay = document.getElementById('user-display');
+      if (currentSession.role === 'player') {
+        userDisplay.innerHTML = `<strong>${currentSession.name}</strong> (Player) | `;
+      } else {
+        userDisplay.innerHTML = `<strong>Dungeon Master</strong> | `;
+        document.getElementById('config-controls').style.display = 'flex';
+      }
+
+      connect();
+      setInterval(() => send({ type: "ping" }), 15000);
     }
 
     init();
