@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Pyramid Puzzle Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .test-results {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            padding: 8px;
+            margin: 4px 0;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-info {
+            background: #e6f7ff;
+            border-left: 3px solid #1890ff;
+        }
+        .log-error {
+            background: #fff1f0;
+            border-left: 3px solid #ff4d4f;
+        }
+        .log-warning {
+            background: #fffbe6;
+            border-left: 3px solid #faad14;
+        }
+        .log-success {
+            background: #f6ffed;
+            border-left: 3px solid #52c41a;
+        }
+        svg {
+            max-width: 100%;
+            height: auto;
+        }
+        .connection-line {
+            stroke: #ccc;
+            stroke-width: 2;
+            fill: none;
+        }
+        .circle {
+            fill: #F5E6D3;
+            stroke: #8B7355;
+            stroke-width: 2;
+            cursor: pointer;
+            transition: fill 0.2s, stroke 0.2s, stroke-width 0.2s;
+        }
+        .circle.highlighted {
+            fill: #FFD700;
+            stroke: #DAA520;
+            stroke-width: 3;
+        }
+        .circle.valid-hover:hover {
+            transform: scale(1.1);
+            fill: #FFF4CC;
+        }
+        .circle.invalid-hover {
+            cursor: not-allowed;
+        }
+        .circle.invalid-hover:hover {
+            fill: #FFB3B3;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        button {
+            padding: 10px 20px;
+            background: #4299e1;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #3182ce;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h2>Pyramid Puzzle - Visual Test</h2>
+        <p>This page tests the pyramid puzzle hover and click behavior.</p>
+        <button onclick="testHoverBehavior()">Test Hover Behavior</button>
+        <button onclick="testCircleClicks()">Test Circle Clicks</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+    </div>
+
+    <div class="test-container">
+        <svg id="pyramid-svg" width="800" height="500" viewBox="0 0 800 500"></svg>
+    </div>
+
+    <div class="test-results">
+        <h2>Test Results</h2>
+        <div id="log-output"></div>
+    </div>
+
+    <script>
+        let highlighted = new Set();
+        let pyramidConfig = { layers: 5, bottomSize: 1 };
+        let pyramidData = { circles: [], connections: [] };
+        let logCount = 0;
+
+        function log(message, type = 'info') {
+            logCount++;
+            const logOutput = document.getElementById('log-output');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logOutput.insertBefore(entry, logOutput.firstChild);
+        }
+
+        function clearLogs() {
+            document.getElementById('log-output').innerHTML = '';
+            logCount = 0;
+            log('Logs cleared', 'info');
+        }
+
+        function calculatePyramidLayout(layers, bottomSize) {
+            const CIRCLE_RADIUS = 30;
+            const HORIZONTAL_SPACING = 80;
+            const VERTICAL_SPACING = 80;
+            
+            const circles = [];
+            const connections = [];
+            
+            for (let layer = 0; layer < layers; layer++) {
+                const circlesInLayer = bottomSize + layer;
+                const layerY = (layers - 1 - layer) * VERTICAL_SPACING + 100;
+                const layerWidth = (circlesInLayer - 1) * HORIZONTAL_SPACING;
+                const startX = (800 - layerWidth) / 2;
+                
+                for (let i = 0; i < circlesInLayer; i++) {
+                    const x = startX + i * HORIZONTAL_SPACING;
+                    const y = layerY;
+                    const id = `${layer}-${i}`;
+                    
+                    circles.push({ id, layer, index: i, x, y, radius: CIRCLE_RADIUS });
+                    
+                    if (layer < layers - 1) {
+                        connections.push({ from: id, to: `${layer + 1}-${i}` });
+                        if (i < circlesInLayer - 1) {
+                            connections.push({ from: id, to: `${layer + 1}-${i + 1}` });
+                        }
+                    }
+                }
+            }
+            
+            return { circles, connections };
+        }
+
+        function canHighlightCircle(circleId, currentHighlighted, config) {
+            const [layer, index] = circleId.split('-').map(Number);
+            
+            if (layer === 0) return true;
+            
+            const below1 = `${layer - 1}-${index}`;
+            const below2 = `${layer - 1}-${index + 1}`;
+            
+            return currentHighlighted.has(below1) || currentHighlighted.has(below2);
+        }
+
+        function canDeselect(circleId, currentHighlighted, config) {
+            const [layer, index] = circleId.split('-').map(Number);
+            
+            for (const highlighted of currentHighlighted) {
+                if (highlighted === circleId) continue;
+                
+                const [hLayer, hIndex] = highlighted.split('-').map(Number);
+                if (hLayer > layer) {
+                    const tempSet = new Set(currentHighlighted);
+                    tempSet.delete(circleId);
+                    if (!canHighlightCircle(highlighted, tempSet, config)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        function renderPyramid() {
+            const svg = document.getElementById('pyramid-svg');
+            svg.innerHTML = '';
+            
+            pyramidData = calculatePyramidLayout(pyramidConfig.layers, pyramidConfig.bottomSize);
+            
+            const circleMap = new Map();
+            pyramidData.circles.forEach(c => circleMap.set(c.id, c));
+            
+            // Render connection lines
+            pyramidData.connections.forEach(conn => {
+                const from = circleMap.get(conn.from);
+                const to = circleMap.get(conn.to);
+                if (from && to) {
+                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    line.setAttribute('x1', from.x);
+                    line.setAttribute('y1', from.y);
+                    line.setAttribute('x2', to.x);
+                    line.setAttribute('y2', to.y);
+                    line.setAttribute('class', 'connection-line');
+                    svg.appendChild(line);
+                }
+            });
+            
+            // Render circles
+            pyramidData.circles.forEach(circle => {
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                
+                const circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circ.setAttribute('cx', circle.x);
+                circ.setAttribute('cy', circle.y);
+                circ.setAttribute('r', circle.radius);
+                circ.setAttribute('class', 'circle');
+                circ.setAttribute('data-circle-id', circle.id);
+                
+                if (highlighted.has(circle.id)) {
+                    circ.classList.add('highlighted');
+                }
+                
+                const isHighlighted = highlighted.has(circle.id);
+                const canClick = isHighlighted 
+                    ? canDeselect(circle.id, highlighted, pyramidConfig)
+                    : canHighlightCircle(circle.id, highlighted, pyramidConfig);
+                
+                if (canClick) {
+                    circ.classList.add('valid-hover');
+                } else {
+                    circ.classList.add('invalid-hover');
+                }
+                
+                // Add hover event listeners for testing
+                circ.addEventListener('mouseenter', (e) => {
+                    const rect = circ.getBoundingClientRect();
+                    log(`Hover enter: ${circle.id} at (${Math.round(rect.x)}, ${Math.round(rect.y)})`, 'info');
+                });
+                
+                circ.addEventListener('mouseleave', (e) => {
+                    log(`Hover leave: ${circle.id}`, 'info');
+                });
+                
+                circ.onclick = () => handleCircleClick(circle.id);
+                
+                g.appendChild(circ);
+                svg.appendChild(g);
+            });
+            
+            log(`Rendered pyramid: ${pyramidData.circles.length} circles, ${pyramidData.connections.length} connections`, 'success');
+        }
+
+        function handleCircleClick(circleId) {
+            const isHighlighted = highlighted.has(circleId);
+            const canClick = isHighlighted 
+                ? canDeselect(circleId, highlighted, pyramidConfig)
+                : canHighlightCircle(circleId, highlighted, pyramidConfig);
+            
+            if (!canClick) {
+                log(`Click rejected: ${circleId} (not allowed by rules)`, 'warning');
+                return;
+            }
+            
+            if (isHighlighted) {
+                highlighted.delete(circleId);
+                log(`Circle deselected: ${circleId}`, 'success');
+            } else {
+                highlighted.add(circleId);
+                log(`Circle selected: ${circleId}`, 'success');
+            }
+            
+            renderPyramid();
+        }
+
+        function testHoverBehavior() {
+            log('=== Testing Hover Behavior ===', 'info');
+            log('Hover over circles and watch for position changes in the logs', 'info');
+            log('Look for "trembling" or position shifts when hovering', 'info');
+            
+            // Check if transform-origin is set
+            const circles = document.querySelectorAll('.circle');
+            let hasTransformOrigin = false;
+            circles.forEach(circle => {
+                const style = window.getComputedStyle(circle);
+                if (style.transformOrigin && style.transformOrigin !== '0px 0px') {
+                    hasTransformOrigin = true;
+                }
+            });
+            
+            if (!hasTransformOrigin) {
+                log('WARNING: No transform-origin set on circles - this may cause positioning issues', 'warning');
+            }
+            
+            // Check for transform in hover state
+            const validHoverCircles = document.querySelectorAll('.circle.valid-hover');
+            log(`Found ${validHoverCircles.length} circles with valid-hover class`, 'info');
+        }
+
+        function testCircleClicks() {
+            log('=== Testing Circle Clicks ===', 'info');
+            
+            // Clear current state
+            highlighted.clear();
+            renderPyramid();
+            log('Cleared all highlights', 'info');
+            
+            // Test clicking bottom circle
+            const bottomCircle = pyramidData.circles.find(c => c.layer === 0);
+            if (bottomCircle) {
+                log(`Attempting to click bottom circle: ${bottomCircle.id}`, 'info');
+                handleCircleClick(bottomCircle.id);
+            }
+            
+            // Test clicking a circle in the next layer
+            setTimeout(() => {
+                const nextLayerCircle = pyramidData.circles.find(c => c.layer === 1);
+                if (nextLayerCircle) {
+                    log(`Attempting to click next layer circle: ${nextLayerCircle.id}`, 'info');
+                    handleCircleClick(nextLayerCircle.id);
+                }
+            }, 500);
+            
+            // Test clicking an invalid circle
+            setTimeout(() => {
+                const topCircle = pyramidData.circles.find(c => c.layer === pyramidConfig.layers - 1);
+                if (topCircle) {
+                    log(`Attempting to click top circle (should be rejected): ${topCircle.id}`, 'info');
+                    handleCircleClick(topCircle.id);
+                }
+            }, 1000);
+        }
+
+        // Initialize
+        window.addEventListener('DOMContentLoaded', () => {
+            log('Pyramid puzzle test page loaded', 'success');
+            renderPyramid();
+            log('Initial render complete', 'success');
+            log('Hover over circles to test hover behavior', 'info');
+            log('Click circles to test selection logic', 'info');
+        });
+
+        // Capture any errors
+        window.addEventListener('error', (e) => {
+            log(`ERROR: ${e.message} at ${e.filename}:${e.lineno}`, 'error');
+        });
+    </script>
+</body>
+</html>

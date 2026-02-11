@@ -92,18 +92,20 @@
     svg {
       max-width: 100%;
       height: auto;
+      shape-rendering: geometricPrecision;
     }
     .connection-line {
-      stroke: #ccc;
-      stroke-width: 2;
+      stroke: #999;
+      stroke-width: 1.5;
       fill: none;
+      opacity: 0.5;
     }
     .circle {
       fill: #F5E6D3;
       stroke: #8B7355;
       stroke-width: 2;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: fill 0.15s ease, stroke 0.15s ease, stroke-width 0.15s ease;
     }
     .circle.highlighted {
       fill: #FFD700;
@@ -111,14 +113,17 @@
       stroke-width: 3;
     }
     .circle.valid-hover:hover {
-      transform: scale(1.1);
-      fill: #FFF4CC;
+      fill: #FFE680;
+      stroke: #DAA520;
+      stroke-width: 3;
     }
     .circle.invalid-hover {
       cursor: not-allowed;
     }
     .circle.invalid-hover:hover {
       fill: #FFB3B3;
+      stroke: #E53E3E;
+      stroke-width: 2;
     }
   </style>
 </head>
@@ -190,8 +195,11 @@
           circles.push({ id, layer, index: i, x, y, radius: CIRCLE_RADIUS });
           
           if (layer < layers - 1) {
-            connections.push({ from: id, to: `${layer + 1}-${i}` });
-            if (i < circlesInLayer - 1) {
+            const nextLayerSize = bottomSize + layer + 1;
+            if (i < nextLayerSize) {
+              connections.push({ from: id, to: `${layer + 1}-${i}` });
+            }
+            if (i + 1 < nextLayerSize) {
               connections.push({ from: id, to: `${layer + 1}-${i + 1}` });
             }
           }
@@ -204,30 +212,64 @@
     function canHighlightCircle(circleId, currentHighlighted, config) {
       const [layer, index] = circleId.split('-').map(Number);
       
-      if (layer === 0) return true;
+      if (layer === 0) {
+        return { canHighlight: true, reason: 'bottom layer' };
+      }
       
-      const below1 = `${layer - 1}-${index}`;
-      const below2 = `${layer - 1}-${index + 1}`;
+      const layerBelowSize = config.bottomSize + (layer - 1);
+      const connectingCircles = [];
       
-      return currentHighlighted.has(below1) || currentHighlighted.has(below2);
+      if (index > 0 && index - 1 < layerBelowSize) {
+        connectingCircles.push(`${layer - 1}-${index - 1}`);
+      }
+      if (index < layerBelowSize) {
+        connectingCircles.push(`${layer - 1}-${index}`);
+      }
+      
+      const highlightedConnections = connectingCircles.filter(c => currentHighlighted.has(c));
+      
+      if (highlightedConnections.length > 0) {
+        return { 
+          canHighlight: true, 
+          reason: `connected to ${highlightedConnections.join(', ')}`
+        };
+      }
+      
+      return { 
+        canHighlight: false, 
+        reason: `no connected circles below (need ${connectingCircles.join(' or ')})`,
+        required: connectingCircles
+      };
     }
 
     function canDeselect(circleId, currentHighlighted, config) {
       const [layer, index] = circleId.split('-').map(Number);
+      
+      const dependentCircles = [];
+      const tempSet = new Set(currentHighlighted);
+      tempSet.delete(circleId);
       
       for (const highlighted of currentHighlighted) {
         if (highlighted === circleId) continue;
         
         const [hLayer, hIndex] = highlighted.split('-').map(Number);
         if (hLayer > layer) {
-          const tempSet = new Set(currentHighlighted);
-          tempSet.delete(circleId);
-          if (!canHighlightCircle(highlighted, tempSet, config)) {
-            return false;
+          const result = canHighlightCircle(highlighted, tempSet, config);
+          if (!result.canHighlight) {
+            dependentCircles.push(highlighted);
           }
         }
       }
-      return true;
+      
+      if (dependentCircles.length > 0) {
+        return { 
+          canDeselect: false, 
+          reason: `circles above depend on it: ${dependentCircles.join(', ')}`,
+          dependentCircles
+        };
+      }
+      
+      return { canDeselect: true, reason: 'no dependencies' };
     }
 
     function renderPyramid() {
@@ -239,6 +281,8 @@
       const circleMap = new Map();
       pyramidData.circles.forEach(c => circleMap.set(c.id, c));
       
+      let renderedConnections = 0;
+      let missingConnections = [];
       pyramidData.connections.forEach(conn => {
         const from = circleMap.get(conn.from);
         const to = circleMap.get(conn.to);
@@ -250,8 +294,15 @@
           line.setAttribute('y2', to.y);
           line.setAttribute('class', 'connection-line');
           svg.appendChild(line);
+          renderedConnections++;
+        } else {
+          missingConnections.push(`${conn.from} -> ${conn.to}`);
         }
       });
+      
+      if (missingConnections.length > 0) {
+        console.warn(`⚠️ ${missingConnections.length} connections failed to render:`, missingConnections);
+      }
       
       pyramidData.circles.forEach(circle => {
         const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -268,9 +319,11 @@
         }
         
         const isHighlighted = highlighted.has(circle.id);
-        const canClick = isHighlighted 
+        const validationResult = isHighlighted 
           ? canDeselect(circle.id, highlighted, pyramidConfig)
           : canHighlightCircle(circle.id, highlighted, pyramidConfig);
+        
+        const canClick = isHighlighted ? validationResult.canDeselect : validationResult.canHighlight;
         
         if (canClick) {
           circ.classList.add('valid-hover');
@@ -287,18 +340,43 @@
 
     function handleCircleClick(circleId) {
       const isHighlighted = highlighted.has(circleId);
-      const canClick = isHighlighted 
-        ? canDeselect(circleId, highlighted, pyramidConfig)
-        : canHighlightCircle(circleId, highlighted, pyramidConfig);
+      const [layer, index] = circleId.split('-').map(Number);
       
-      if (!canClick) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn(`⚠️ Cannot toggle circle ${circleId} - WebSocket not connected`, {
+          readyState: ws ? ws.readyState : 'null',
+          isHighlighted
+        });
         return;
       }
       
+      const validationResult = isHighlighted 
+        ? canDeselect(circleId, highlighted, pyramidConfig)
+        : canHighlightCircle(circleId, highlighted, pyramidConfig);
+      
+      const canClick = isHighlighted ? validationResult.canDeselect : validationResult.canHighlight;
+      
+      if (!canClick) {
+        console.log(`❌ Click rejected for circle ${circleId} (layer ${layer}, index ${index})`, {
+          action: isHighlighted ? 'deselect' : 'select',
+          reason: validationResult.reason,
+          currentHighlighted: Array.from(highlighted),
+          ...(validationResult.required && { required: validationResult.required }),
+          ...(validationResult.dependentCircles && { dependentCircles: validationResult.dependentCircles })
+        });
+        return;
+      }
+      
+      console.log(`🔄 Sending toggle for circle ${circleId} (layer ${layer}, index ${index})`, {
+        action: isHighlighted ? 'deselect' : 'select',
+        reason: validationResult.reason,
+        currentHighlighted: Array.from(highlighted)
+      });
       send({ type: "circle_toggle", circleId: circleId });
     }
 
     function applySnapshot(highlightedArray) {
+      console.log(`📸 Applying snapshot:`, highlightedArray);
       highlighted.clear();
       highlightedArray.forEach(id => highlighted.add(id));
       renderPyramid();
@@ -313,6 +391,7 @@
         return;
       }
       
+      console.log(`⚙️ Applying new config:`, { layers, bottomSize });
       send({ type: "pyramid_config", layers, bottomSize });
     }
 
@@ -331,6 +410,11 @@
         const msg = JSON.parse(ev.data);
 
         if (msg.type === "state_sync") {
+          console.log(`📦 Received state_sync:`, {
+            layers: msg.layers,
+            bottomSize: msg.bottomSize,
+            highlighted: msg.highlighted
+          });
           if (msg.layers !== undefined) pyramidConfig.layers = msg.layers;
           if (msg.bottomSize !== undefined) pyramidConfig.bottomSize = msg.bottomSize;
           
@@ -342,6 +426,10 @@
           const topSize = pyramidConfig.bottomSize + pyramidConfig.layers - 1;
           statusEl.textContent = `Connected (room: ${roomId}) | Pyramid: ${pyramidConfig.layers} layers, bottom: ${pyramidConfig.bottomSize}, top: ${topSize}`;
         } else if (msg.type === "config_sync") {
+          console.log(`⚙️ Received config_sync:`, {
+            layers: msg.layers,
+            bottomSize: msg.bottomSize
+          });
           pyramidConfig.layers = msg.layers;
           pyramidConfig.bottomSize = msg.bottomSize;
           
@@ -349,11 +437,17 @@
           document.getElementById('bottom-size-input').value = pyramidConfig.bottomSize;
           
           highlighted.clear();
+          console.log(`🔄 Pyramid reconfigured, all circles cleared`);
           renderPyramid();
           
           const topSize = pyramidConfig.bottomSize + pyramidConfig.layers - 1;
           statusEl.textContent = `Connected (room: ${roomId}) | Pyramid: ${pyramidConfig.layers} layers, bottom: ${pyramidConfig.bottomSize}, top: ${topSize}`;
         } else if (msg.type === "circle_toggled") {
+          console.log(`✅ Circle ${msg.circleId} ${msg.isHighlighted ? 'highlighted' : 'unhighlighted'}`, {
+            circleId: msg.circleId,
+            isHighlighted: msg.isHighlighted,
+            allHighlighted: Array.from(highlighted)
+          });
           if (msg.isHighlighted) {
             highlighted.add(msg.circleId);
           } else {
@@ -361,9 +455,9 @@
           }
           renderPyramid();
         } else if (msg.type === "toggle_rejected") {
-          console.warn("Toggle rejected:", msg.reason);
+          console.warn(`⛔ Toggle rejected: ${msg.circleId} - ${msg.reason}`);
         } else if (msg.type === "error") {
-          console.warn("Server error:", msg.message);
+          console.warn(`❌ Server error: ${msg.message}`);
         }
       };
 

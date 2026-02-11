@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Set
@@ -11,6 +12,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, 
 from fastapi.responses import PlainTextResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -61,50 +65,58 @@ def get_session(session_id: str) -> Dict | None:
     return sessions.get(session_id)
 
 
-def can_highlight_circle(room: Room, layer: int, index: int) -> bool:
+def can_highlight_circle(room: Room, layer: int, index: int) -> tuple[bool, str]:
     if layer == 0:
-        return True
+        return True, "bottom layer - always allowed"
     
-    connected_below = [
-        (layer - 1, index),
-        (layer - 1, index + 1)
-    ]
+    layer_below_size = room.bottom_size + (layer - 1)
+    connected_below = []
     
+    if index > 0 and index - 1 < layer_below_size:
+        connected_below.append((layer - 1, index - 1))
+    if index < layer_below_size:
+        connected_below.append((layer - 1, index))
+    
+    connected_highlighted = []
     for (l, i) in connected_below:
-        circles_in_layer = room.bottom_size + l
-        if l >= 0 and i < circles_in_layer:
-            circle_id = f"{l}-{i}"
-            if circle_id in room.highlighted:
-                return True
+        circle_id = f"{l}-{i}"
+        if circle_id in room.highlighted:
+            connected_highlighted.append(circle_id)
     
-    return False
+    if connected_highlighted:
+        return True, f"connected to highlighted: {', '.join(connected_highlighted)}"
+    
+    required = [f"{l}-{i}" for (l, i) in connected_below]
+    return False, f"no connected circles below (need {' or '.join(required) if required else 'none exist'})"
 
 
-def has_dependent_circles(room: Room, layer: int, index: int) -> bool:
+def has_dependent_circles(room: Room, layer: int, index: int) -> tuple[bool, list[str]]:
+    dependent = []
     for highlighted_id in room.highlighted:
         h_layer, h_index = map(int, highlighted_id.split('-'))
         if h_layer > layer:
             temp_highlighted = room.highlighted - {f"{layer}-{index}"}
             if not can_highlight_circle_with_set(room, h_layer, h_index, temp_highlighted):
-                return True
-    return False
+                dependent.append(highlighted_id)
+    return len(dependent) > 0, dependent
 
 
 def can_highlight_circle_with_set(room: Room, layer: int, index: int, highlighted_set: Set[str]) -> bool:
     if layer == 0:
         return True
     
-    connected_below = [
-        (layer - 1, index),
-        (layer - 1, index + 1)
-    ]
+    layer_below_size = room.bottom_size + (layer - 1)
+    connected_below = []
+    
+    if index > 0 and index - 1 < layer_below_size:
+        connected_below.append((layer - 1, index - 1))
+    if index < layer_below_size:
+        connected_below.append((layer - 1, index))
     
     for (l, i) in connected_below:
-        circles_in_layer = room.bottom_size + l
-        if l >= 0 and i < circles_in_layer:
-            circle_id = f"{l}-{i}"
-            if circle_id in highlighted_set:
-                return True
+        circle_id = f"{l}-{i}"
+        if circle_id in highlighted_set:
+            return True
     
     return False
 
@@ -137,28 +149,41 @@ async def broadcast(room: Room, message: dict) -> None:
 
 @app.websocket("/ws/{room_id}")
 async def ws_room(ws: WebSocket, room_id: str):
-    await ws.accept()
+    try:
+        await ws.accept()
+        logger.info(f"[{room_id}] WebSocket accepted")
 
-    session_id = ws.cookies.get("session_id")
-    session = get_session(session_id) if session_id else None
-    
-    if not session:
-        await safe_send(ws, {"type": "error", "message": "Not authenticated"})
-        await ws.close()
+        session_id = ws.cookies.get("session_id")
+        session = get_session(session_id) if session_id else None
+        
+        if not session:
+            logger.warning(f"[{room_id}] Not authenticated, closing")
+            await safe_send(ws, {"type": "error", "message": "Not authenticated"})
+            await ws.close()
+            return
+
+        logger.info(f"[{room_id}] Authenticated as {session.get('role')}: {session.get('name', 'DM')}")
+
+        room = get_room(room_id)
+        room.clients.add(ws)
+
+        logger.info(f"[{room_id}] Sending initial state_sync")
+        await safe_send(
+            ws,
+            {
+                "type": "state_sync",
+                "highlighted": sorted(room.highlighted),
+                "layers": room.layers,
+                "bottomSize": room.bottom_size,
+            },
+        )
+        logger.info(f"[{room_id}] Initial state sent successfully")
+
+    except Exception as e:
+        logger.error(f"[{room_id}] ERROR during WebSocket setup: {e}")
+        import traceback
+        traceback.print_exc()
         return
-
-    room = get_room(room_id)
-    room.clients.add(ws)
-
-    await safe_send(
-        ws,
-        {
-            "type": "state_sync",
-            "highlighted": sorted(room.highlighted),
-            "layers": room.layers,
-            "bottomSize": room.bottom_size,
-        },
-    )
 
     try:
         while True:
@@ -189,28 +214,36 @@ async def ws_room(ws: WebSocket, room_id: str):
 
                 async with room.lock:
                     if circle_id in room.highlighted:
-                        if has_dependent_circles(room, layer, index):
+                        has_deps, dependent_circles = has_dependent_circles(room, layer, index)
+                        if has_deps:
+                            reason = f"circles above depend on it: {', '.join(dependent_circles)}"
+                            logger.warning(f"[ Deselect rejected for {circle_id} - {reason}")
                             await safe_send(ws, {
                                 "type": "toggle_rejected",
                                 "circleId": circle_id,
-                                "reason": "Cannot deselect: circles above depend on this one"
+                                "reason": f"Cannot deselect: {reason}"
                             })
                             continue
                         
                         room.highlighted.remove(circle_id)
                         is_highlighted = False
+                        logger.info(f"[{room_id}] ✅ Circle deselected: {circle_id} (layer {layer}, index {index})")
                     else:
-                        if not can_highlight_circle(room, layer, index):
+                        can_highlight, reason = can_highlight_circle(room, layer, index)
+                        if not can_highlight:
+                            logger.warning(f"[ Select rejected for {circle_id} - {reason}")
                             await safe_send(ws, {
                                 "type": "toggle_rejected",
                                 "circleId": circle_id,
-                                "reason": "Must highlight a connected circle below first"
+                                "reason": f"Cannot select: {reason}"
                             })
                             continue
                         
                         room.highlighted.add(circle_id)
                         is_highlighted = True
+                        logger.info(f"[{room_id}] ✅ Circle selected: {circle_id} (layer {layer}, index {index}) - {reason}")
 
+                logger.info(f"[{room_id}] Current highlighted circles: {sorted(room.highlighted)}")
                 await broadcast(
                     room,
                     {
@@ -240,6 +273,8 @@ async def ws_room(ws: WebSocket, room_id: str):
                     room.layers = layers
                     room.bottom_size = bottom_size
                     room.highlighted.clear()
+                    logger.info(f"[{room_id}] Pyramid config updated: layers={layers}, bottom_size={bottom_size}")
+                    logger.info(f"[{room_id}] All highlighted circles cleared")
 
                 await broadcast(
                     room,
@@ -268,8 +303,13 @@ async def ws_room(ws: WebSocket, room_id: str):
                 await safe_send(ws, {"type": "error", "message": f"Unknown type: {msg_type}"})
 
     except WebSocketDisconnect:
-        pass
+        logger.info(f"[{room_id}] WebSocket disconnected normally")
+    except Exception as e:
+        logger.error(f"[ in WebSocket message loop: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
+        logger.info(f"[{room_id}] Removing client from room")
         room.clients.discard(ws)
 
 
